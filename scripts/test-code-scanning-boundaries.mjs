@@ -45,6 +45,8 @@ function timerFixture(random = 0) {
     section('  function scheduleSocialReply(', '  // 全局扫描'),
     section('  function scheduleReplyCheckV2(', '  /** 会话此刻算忙'),
     section('  function scheduleWakeV2(', '  /**\n   * 回合结束后补发'),
+    // 主动回复黑名单：scheduleProactiveCheckV2 里会先问 proactiveDisabled()
+    section('  function proactiveDisabledKeys(', '  function scheduleProactiveCheckV2('),
     section('  function scheduleProactiveCheckV2(', '  function clearSocialV2Timers('),
     'globalThis.fns = { sleep, scheduleSocialReply, scheduleReplyCheckV2, scheduleWakeV2, scheduleProactiveCheckV2 };',
   ].join('\n'), context);

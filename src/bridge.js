@@ -10430,20 +10430,28 @@ async function main() {
     };
     // 统一周期优先；其次兼容上游的 cfg.role.injectEveryNWakes（顶层键）；
     // 都没有时用 promptGating.metaEveryWakes，保证角色卡与规则块始终同频。
+    // 优先级：socialV2.role.injectEveryNWakes（统一周期，显式）
+    //   → socialV2.promptGating.metaEveryWakes（本仓库显式配置）
+    //   → 上游顶层 cfg.role.injectEveryNWakes（rc1 默认 4，只是兜底，不该盖掉显式配置）
+    //   → 4
     const unified = toPeriod(role.injectEveryNWakes)
-      ?? toPeriod(cfg.role?.injectEveryNWakes)
       ?? toPeriod(raw.metaEveryWakes)
-      ?? 4; // 都没配时沿用上游默认 4，保证「什么都不配」的口味与 0.2.2-rc1 一致
+      ?? toPeriod(cfg.role?.injectEveryNWakes)
+      ?? 4;
+    const roleCardPeriod = toPeriod(raw.roleCardEveryWakes);
     return {
       enabled: raw.enabled !== false,
-      metaEveryWakes: unified ?? toPeriod(raw.metaEveryWakes) ?? 5,
-      roleCardEveryWakes: unified ?? toPeriod(raw.roleCardEveryWakes),
+      metaEveryWakes: unified,
+      // 角色卡周期：显式配的 roleCardEveryWakes 优先（独立节奏），否则跟随统一周期
+      roleCardEveryWakes: roleCardPeriod ?? unified,
       unifiedEveryWakes: unified,
-      // 去重窗口：上游用顶层 cfg.role.injectDedupeWindowMs（测试会设成 0），我们优先认它，
-      // 没写时才用 socialV2.promptGating.dedupeMs。
-      dedupeMs: Number.isFinite(Number(cfg.role?.injectDedupeWindowMs))
-        ? Number(cfg.role.injectDedupeWindowMs)
-        : (Number.isFinite(Number(raw.dedupeMs)) ? Number(raw.dedupeMs) : 8000)
+      // 去重窗口：同一次唤醒里 buildWakePromptV2 会跑两次（预构建 + 真正投递），
+      // 窗口内沿用上次判定，别把「每 5 轮」消耗成「每 3 轮」。
+      // 优先级：socialV2.promptGating.dedupeMs（本仓库显式配置优先，测试用它关掉去重）
+      //        → 上游顶层 cfg.role.injectDedupeWindowMs → 默认 8000ms。
+      dedupeMs: Number.isFinite(Number(raw.dedupeMs))
+        ? Number(raw.dedupeMs)
+        : (Number.isFinite(Number(cfg.role?.injectDedupeWindowMs)) ? Number(cfg.role.injectDedupeWindowMs) : 8000)
     };
   }
 
@@ -10505,6 +10513,35 @@ async function main() {
     }
     if (key) log(`[promptGating] ${key} ${decision.full ? '注入完整规则块' : '省略规则块（占位一行）'}（${decision.reason}）`);
     return decision;
+  }
+
+  // ── 表情空窗计数 ─────────────────────────────────────────────────────────
+  // 「连续多少轮没发表情」：真人是被图带起来的，不是按计数发；隔太久才提醒一句。
+  // 计数落在 state/prompt-gating.json（social-v2.json 只持久化白名单字段，塞进去会被丢掉）。
+  const STICKER_GAP_REMIND_ROUNDS = 3;
+  function stickerGapOf(key) {
+    if (!key) return 0;
+    const store = promptGatingStore();
+    const rec = store[key] && typeof store[key] === 'object' ? store[key] : {};
+    return Math.max(0, Number(rec.stickerGap) || 0);
+  }
+  function bumpStickerGap(key) {
+    if (!key) return 0;
+    const store = promptGatingStore();
+    const rec = store[key] && typeof store[key] === 'object' ? store[key] : {};
+    rec.stickerGap = stickerGapOf(key) + 1;
+    store[key] = rec;
+    savePromptGatingStore();
+    return rec.stickerGap;
+  }
+  /** 发过表情（或 meme）就清零，下一轮重新开始数。 */
+  function noteStickerSentV2(key) {
+    if (!key) return;
+    const store = promptGatingStore();
+    const rec = store[key] && typeof store[key] === 'object' ? store[key] : {};
+    rec.stickerGap = 0;
+    store[key] = rec;
+    savePromptGatingStore();
   }
 
   function roleForWake(key, { allowStub = true, forceFull = false, fullOverride } = {}) {
@@ -10811,7 +10848,7 @@ async function main() {
   }
 
   // ── 二代仿真模式（reserved2）唤醒调度 ──────────────────────────────────
-  function appendSocialV2Message(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwner, messageId, media = [], userId = null, forwardIds = []) {
+  function appendSocialV2Message(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwner, messageId, media = [], userId = null, forwardIds = [], meta = {}) {
     const st = getSocialV2State(key);
     const recentLimit = Number(cfg.socialV2?.context?.recentLimit) || 100;
     const unreadLimit = Number(cfg.socialV2?.context?.unreadLimit) || 30;
@@ -10852,6 +10889,10 @@ async function main() {
       if (m?.emojiId) item.emojiId = String(m.emojiId);
       if (m?.summary) item.summary = sanitizeMediaSummary(m.summary);
       if (m?.subType) item.subType = String(m.subType);
+      // 媒体刷新（qq_get_message_images 重新取图）需要知道它属于哪条消息、哪个会话：
+      // 上游不存这两个字段，丢了就只能按 url 猜，重取时对不上原消息。
+      if (msgId) item.messageId = msgId;
+      item.convKey = key;
       return item;
     }).filter((m) => (m.kind === 'face' ? !!m.faceId : !!(m.file || m.url || m.emojiId))) : [];
     const safeForwardIds = (Array.isArray(forwardIds) ? forwardIds : []).map(sanitizeForwardId).filter(Boolean);
@@ -10879,6 +10920,8 @@ async function main() {
       plain: truncateText(String(plainContent ?? textContent), 200),
       tail: truncateTextTail(String(plainContent ?? textContent), 200),
       quoteTargetIsSelf: !!quoteTargetIsSelf,
+      // 事件里带 @ 我 的段：上游没有这个字段，留作诊断与媒体刷新判据
+      atSelf: meta.atSelf === true,
       isOwner: !!isOwner,
       ownerLabel: isOwner ? `管理员（ownerQQ ${cfg.ownerQQ ?? ''}）` : '',
       isSelf: false,
@@ -10886,7 +10929,9 @@ async function main() {
       hasMedia: safeMedia.length > 0,
       forwardIds: safeForwardIds,
       hasForward: safeForwardIds.length > 0,
-      time: Date.now()
+      // 优先用事件时间（OneBot 的 time 单位是秒）：补拉/重连进来的旧消息必须保留真实时间，
+      // 否则【时间感】会把它当成"刚刚"，120 分钟/48 小时的分档规则整体失效。
+      time: Number(meta.eventTime) > 0 ? Number(meta.eventTime) : Date.now()
     };
     st.lastUnreadSeq = msg.seq;
     st.lastIncomingAt = Date.now();
@@ -11365,8 +11410,15 @@ async function main() {
     const antiAiLine = metaFull ? '【反AI味】你不是客服：不用有求必应，可以装傻、已读乱回、拒绝推荐；少用“一绝/真管用/保证/绝对”这类词。\n\n' : '';
     const stickerCfg = cfg.socialV2?.sticker ?? {};
     // 策略进规则块（可省略），清单是素材、每轮都发 —— 与 0.2.1-r1 的取舍一致。
-    const stickerLine = stickerCfg.enabled !== false && stickerCfg.includeInPrompt !== false
+    const stickerOn = stickerCfg.enabled !== false && stickerCfg.includeInPrompt !== false;
+    const stickerLine = stickerOn
       ? `${metaFull ? `${buildStickerStrategyHint()}\n` : ''}${buildStickerContext(stickerEntries, stickerCfg.promptMaxStickers ?? 8, key)}\n\n`
+      : '';
+    // 连续多少轮没发表情：够久就提醒一句（语境合适才发，不是按计数发）。
+    // 计数走 prompt-gating.json；预构建（commitPromptBlocks:false）不推进，避免一个唤醒算两轮。
+    const stickerGapRounds = stickerOn ? stickerGapOf(key) : 0;
+    const stickerGapLine = stickerOn && stickerGapRounds >= STICKER_GAP_REMIND_ROUNDS
+      ? `【表情包】已经 ${stickerGapRounds} 轮没发了，语境合适就顺手来一张：挑图用 qq_list_stickers / qq_list_memes，发送用 qq_send_sticker / qq_send_meme。\n\n`
       : '';
     const preSleepMs = Math.max(0, Number(cfg.socialV2?.wake?.preSleepWaitMs) || 300000);
     const proactiveLine = '【积极性】不要习惯性潜水：群里有你能接的话题就主动参与，偶尔插一句别人的话题也很正常；只有确实没话可说、对方已明确结束、或长时间没人说话时才潜水。\n\n';
@@ -11404,7 +11456,9 @@ async function main() {
     const initialPromptLine = initialPromptText ? `${initialPromptText}\n\n` : '';
     // 时间感放在 base 的最末尾：紧接着就是【唤醒】原因与行动指令，位置最显眼。
     const timeSenseLine = buildTimeSenseLine(st);
-    const base = roleLine + identityLine + tokenLine + initialPromptLine + antiAiLine + proactiveLine + stickerLine + replyLine + statusLine + wakeLine + memoryLine + participationLine + preSleepLine + timeSenseLine;
+    const base = roleLine + identityLine + tokenLine + initialPromptLine + antiAiLine + proactiveLine + stickerLine + stickerGapLine + replyLine + statusLine + wakeLine + memoryLine + participationLine + preSleepLine + timeSenseLine;
+    // 投递成功才算「这一轮过去了」：预构建（commit:false）不推进表情空窗计数。
+    if (stickerOn && opts.commitPromptBlocks !== false) bumpStickerGap(key);
     // 唤醒原因里的那条消息本身多旧：`atMention@seq194` 这种形态能反查到原消息。
     const triggeredSeq = wakeReasonSeq(reason);
     const triggeredMsg = triggeredSeq ? findV2MessageBySeq(st, triggeredSeq) : null;
@@ -12072,7 +12126,15 @@ async function main() {
     // 二代仿真模式（reserved2）：唤醒调度
     if (currentMode === 'reserved2') {
       const sender = kind === 'group' ? (event.sender?.card || event.sender?.nickname || String(event.user_id)) : '私聊';
-      appendSocialV2Message(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwner, event.message_id ?? event.msg_id ?? null, mediaList, event.user_id ?? null, extractForwardIds(event.message ?? []));
+      // 事件时间与「是否 @ 了我」都要带进入库记录：
+      //  · 事件时间决定【时间感】里那条消息的 ago，丢了它，补拉/重连进来的旧消息会被当成"刚刚"，
+      //    120 分钟不回、48 小时引用必回这些分档就全失效；
+      //  · atSelf 用于诊断与媒体刷新判断，上游没有这个字段（合并时被丢掉过）。
+      const eventTimeMs = Number(event?.time) > 0 ? Number(event.time) * 1000 : 0;
+      const atSelfNow = Array.isArray(event?.message) && event.message.some(
+        (seg) => seg?.type === 'at' && String(seg.data?.qq) === String(event?.self_id ?? '')
+      );
+      appendSocialV2Message(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwner, event.message_id ?? event.msg_id ?? null, mediaList, event.user_id ?? null, extractForwardIds(event.message ?? []), { eventTime: eventTimeMs, atSelf: atSelfNow });
       // 二代同样收集群聊黑话学习素材（AI 自主提交之外，桥接仍自动提取高频陌生词）
       if (kind === 'group') feedSlangWindow(key, sender, plainContent);
       if (socialV2.paused) {

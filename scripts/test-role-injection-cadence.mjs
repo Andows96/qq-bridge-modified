@@ -26,7 +26,9 @@ async function test(name, fn) {
 }
 
 // 去重窗口关掉，才能连续调用验证节奏（生产默认 8000ms）
-const baseConfig = { role: { injectDedupeWindowMs: 0 } };
+// 去重窗口关掉，才能连续调用验证节奏。注意 socialV2.promptGating.dedupeMs 优先级高于
+// 顶层 cfg.role.injectDedupeWindowMs（前者是本仓库显式配置），两处都要关。
+const baseConfig = { role: { injectDedupeWindowMs: 0 }, socialV2: { promptGating: { dedupeMs: 0 } } };
 const baseFiles = () => ({
   'roles/测试人格.md': CARD_V1,
   'state/current-role.json': JSON.stringify({ role: '测试人格', mode: 'active' })
@@ -100,7 +102,7 @@ await test('未启用角色时不注入【当前角色】段', async () => {
 });
 
 await test('injectEveryNWakes=1 时退回每次全量', async () => {
-  const h = await bridgeHarness({ config: { role: { injectDedupeWindowMs: 0, injectEveryNWakes: 1 } }, files: baseFiles() });
+  const h = await bridgeHarness({ config: { role: { injectDedupeWindowMs: 0, injectEveryNWakes: 1 }, socialV2: { promptGating: { dedupeMs: 0 } } }, files: baseFiles() });
   try {
     for (let i = 0; i < 3; i += 1) {
       assert.match(h.buildWakePromptV2(KEY, 'atMention'), /叫他「宝宝」/, `第 ${i + 1} 次都应全量`);

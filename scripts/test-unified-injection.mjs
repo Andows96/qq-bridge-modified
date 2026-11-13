@@ -29,37 +29,37 @@ test('promptGatingCfg 读取 role.injectEveryNWakes 并暴露 unifiedEveryWakes'
   assert.match(body, /role\.injectEveryNWakes/, '必须读 socialV2.role.injectEveryNWakes');
   assert.match(body, /unifiedEveryWakes/, '必须返回 unifiedEveryWakes 供调用方判断');
   // 统一周期必须同时覆盖两个周期字段，否则会出现一边跟随、一边没跟
-  assert.match(body, /metaEveryWakes:\s*unified\s*\?\?/, 'metaEveryWakes 要以统一周期为准');
-  assert.match(body, /roleCardEveryWakes:\s*unified\s*\?\?/, 'roleCardEveryWakes 要以统一周期为准');
+  assert.match(body, /metaEveryWakes:\s*unified\b/, 'metaEveryWakes 要以统一周期为准');
+  assert.match(body, /roleCardEveryWakes:\s*roleCardPeriod\s*\?\?\s*unified/, '没显式配 roleCardEveryWakes 时跟随统一周期');
 });
 
 test('buildWakePromptV2 先算规则块决策，再让角色卡跟随', () => {
   const body = sliceFunction(src, 'buildWakePromptV2');
   const iDecision = body.indexOf('promptGatingDecision(');
-  const iRole = body.indexOf('roleBlockForPrompt(');
+  const iRole = body.indexOf('roleForWake(');
   assert.ok(iDecision >= 0, '必须调用 promptGatingDecision');
-  assert.ok(iRole >= 0, '必须调用 roleBlockForPrompt');
+  assert.ok(iRole >= 0, '必须调用 roleForWake');
   assert.ok(
     iDecision < iRole,
-    'promptGatingDecision 必须在 roleBlockForPrompt 之前（否则角色卡跟随的是旧的计数）'
+    'promptGatingDecision 必须在 roleForWake 之前（否则角色卡跟随的是旧的计数）'
   );
   assert.match(
     body,
-    /unifiedEveryWakes\s*\?\s*\{\s*\.\.\.opts,\s*fullOverride:\s*metaFull\s*\}/,
+    /roleForWake\([^)]*fullOverride:\s*metaFull/,
     '配了统一周期时要把 metaFull 透传给角色卡'
   );
 });
 
-test('roleBlockForPrompt 支持 fullOverride，且走跟随时只跳过 roleCardWakes', () => {
-  const body = sliceFunction(src, 'roleBlockForPrompt');
-  assert.match(body, /opts\.fullOverride !== undefined/, '必须识别 fullOverride');
-  assert.match(body, /follow-gating/, '跟随分支要给一个可辨认的 reason，方便查日志');
-  // 跟随模式仍然要更新 roleCardSession：否则哪天切回独立计数，
-  // 会拿一个几周前的旧 session id 跟当前会话比，误判成"换会话"多注入一轮全文。
-  assert.match(body, /st\.roleCardSession = decision\.nextSessionId/, '两种模式都要更新 roleCardSession');
-  // 但 wakes 必须跳过：计数归规则块的 promptBlocksWakes 管，
-  // 两边都记会让 roleCardWakes 一直涨却永远用不到。
-  assert.match(body, /if \(!following\) st\.roleCardWakes =/, '跟随分支必须跳过 roleCardWakes 记账');
+test('roleForWake 接受 fullOverride，并按「角色@会话」签名决定要不要重发全文', () => {
+  const body = sliceFunction(src, 'roleForWake');
+  assert.match(body, /fullOverride !== undefined/, '必须识别 fullOverride（统一周期由规则块决定）');
+  // 计数落在独立 store 里：social-v2.json 只持久化白名单字段，塞进去会被静默丢弃（rc1 自己踩过）。
+  assert.match(body, /roleInjectStore\(\)/, '计数必须走 roleInjectStore，不能塞进 social-v2 的状态字段');
+  // 签名里带 roleCardSignature()（换卡）与 state.sessions[key]（换 DSH 会话）：
+  // 两者任一变化都必须立刻重发全文，否则新会话的人格等于没注入。
+  assert.match(body, /roleCardSignature\(\)/, '签名必须包含角色卡签名，换卡要重发');
+  assert.match(body, /state\.sessions\[key\]/, '签名必须包含 DSH 会话 id，换会话要重发');
+  assert.match(body, /allowStub/, '必须支持 allowStub（引导轮/预构建不该被占位行顶掉）');
 });
 
 test('config.json 里配了统一的注入周期', () => {
@@ -80,7 +80,9 @@ test('行为：7 轮里角色卡与规则块同进同出，且 roleCardWakes 不
     config: {
       allow: { private: ['123'], groups: ['456'] },
       socialV2: {
-        promptGating: { enabled: true, metaEveryWakes: 9, roleCardEveryWakes: 10 },
+        // dedupeMs 必须关掉：同一次唤醒里 buildWakePromptV2 会跑两次（预构建 + 真正投递），
+        // 默认 8 秒去重会让 7 轮连跑全落到第一轮判定上，看起来像「每轮都完整」。
+        promptGating: { enabled: true, metaEveryWakes: 9, roleCardEveryWakes: 10, dedupeMs: 0 },
         role: { injectEveryNWakes: 3 },
         roleCard: { mode: 'first', digest: '', fullEveryWakes: 10 },
         wake: { maxWakePerMinute: 0, maxWakePerHour: 0, batchWindowMs: 300 }
@@ -112,10 +114,10 @@ test('行为：7 轮里角色卡与规则块同进同出，且 roleCardWakes 不
       const text = h.buildWakePromptV2('group:456', 'admin');
       rounds.push({
         i,
-        // 规则块占位行以「【你的身份·反AI味…】」开头；完整轮则是「【你的身份】」
-        ruleFull: !text.includes('【你的身份·反AI味'),
-        // 角色卡占位行是「【角色卡】人设已在本会话上文完整给出，沿用即可。」
-        roleFull: !text.includes('【角色卡】人设已在本会话上文完整给出'),
+        // 完整轮带「【你的身份】你在 QQ 上的昵称」；省略轮只有一行「【…】已在本会话上文完整给出，沿用即可。」
+        ruleFull: text.includes('【你的身份】你在 QQ 上的昵称'),
+        // 完整轮带「【角色卡 —— 以下是你的设定」；省略轮只剩一行提醒
+        roleFull: text.includes('【角色卡 —— 以下是你的设定'),
       });
     }
 

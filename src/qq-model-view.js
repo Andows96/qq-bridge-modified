@@ -135,6 +135,8 @@ export function compactModelMessage(message, opts = {}) {
     if (result[key] === false) delete result[key];
   }
   // 时间视图：有效的 epoch 换成 at/ago；缺失或 0（历史兼容/未知）保持原样。
+  // atSelf=false 不占 token（只有"这条 @ 了我"才需要标记）
+  if (!result.atSelf) delete result.atSelf;
   const stamp = Number(result.time);
   if (Number.isFinite(stamp) && stamp > 0) {
     const now = Number.isFinite(Number(opts.now)) ? Number(opts.now) : Date.now();
