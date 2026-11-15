@@ -1,7 +1,7 @@
 # qq-bridge
 
 > [!NOTE]
-> **这是个人改版（fork）**：本仓库基于上游 [Derpyu520/qq-bridge](https://github.com/Derpyu520/qq-bridge) 的 `v0.2.2-rc1`，改版仓库为 [Andows96/qq-bridge-modified](https://github.com/Andows96/qq-bridge-modified)。
+> **这是个人改版（fork）**：本仓库基于上游 [Derpyu520/qq-bridge](https://github.com/Derpyu520/qq-bridge) 的 `v0.2.2-rc1`，改版仓库为 [Andows96/qq-bridge-modified](https://github.com/Andows96/qq-bridge-modified)。本仓库仅为各桥接开发者提供灵感与参考。
 > 相对上游的改动见下方「改版说明」；其余章节（安装、配置、架构、故障排查）沿用上游原文，尚未逐一改写。
 
 ## 改版说明（相对上游 v0.2.2-rc1）
